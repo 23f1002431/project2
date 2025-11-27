@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Quiz</title>
+</head>
+<body>
+    <div id="result"></div>
+    <script>
+        // Base64 encoded quiz question (matching the format from requirements)
+        // Format: Question text + Submit URL
+        const question = `Q1. What is 2 + 2?
+
+Post your answer to http://127.0.0.1:8000/test-submit with this JSON payload:
+
+{
+  "email": "your-email",
+  "secret": "your-secret",
+  "url": "http://127.0.0.1:8080/test_quiz.html",
+  "answer": 4  // the correct answer
+}`;
+        
+        const quizText = btoa(question);
+        document.querySelector("#result").innerHTML = atob(quizText);
+    </script>
+</body>
+</html>
+
