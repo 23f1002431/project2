@@ -7,7 +7,7 @@ An intelligent application that solves data-related quizzes using LLMs, capable 
 - **API Endpoint**: Accepts POST requests with quiz tasks
 - **Secret Verification**: Validates requests using a secret string
 - **Headless Browser**: Renders JavaScript-heavy quiz pages using Playwright
-- **LLM Integration**: Uses the AiPipe API (or another provider you configure) for task understanding and solving
+- **LLM Integration**: Uses the gemini API (or another provider you configure) for task understanding and solving
 - **Data Processing**: Handles PDFs, images, text, CSV, and structured data
 - **Analysis Capabilities**: Performs filtering, sorting, aggregation, and statistical analysis
 - **Visualization**: Generates charts and graphs as base64-encoded images
@@ -47,10 +47,8 @@ cp .env.example .env
 ```
 STUDENT_EMAIL=your-email@example.com
 STUDENT_SECRET=your-secret-string
-AIPIPE_API_KEY=your-aipipe-api-key
-AIPIPE_BASE_URL=https://api.aipipe.ai/v1
-AIPIPE_MODEL=gpt-4o-mini
-DEFAULT_LLM_PROVIDER=aipipe
+GEMINI_KEY=your-gemini-api-key
+DEFAULT_LLM_PROVIDER=gemini
 API_HOST=0.0.0.0
 API_PORT=8000
 ```

@@ -28,10 +28,53 @@ class DataProcessor:
             response.raise_for_status()
             return response.content
     
-    async def call_api(self, url: str, headers: Dict[str, str] = None) -> Any:
-        """Make API call and return response."""
+    async def call_api(
+        self, 
+        url: str, 
+        headers: Dict[str, str] = None,
+        method: str = "GET",
+        data: Any = None,
+        json_data: Any = None
+    ) -> Any:
+        """
+        Make API call (GET or POST) and return response.
+        
+        Args:
+            url: API endpoint URL
+            headers: Optional headers dictionary
+            method: HTTP method ("GET" or "POST"), defaults to "GET"
+            data: Optional data for POST requests (form data, bytes, etc.)
+            json_data: Optional JSON data for POST requests (will be sent as JSON)
+        
+        Returns:
+            Parsed JSON response if possible, otherwise text response
+        """
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, headers=headers or {})
+            if method.upper() == "POST":
+                if json_data is not None:
+                    # Send as JSON
+                    response = await client.post(
+                        url, 
+                        headers=headers or {},
+                        json=json_data
+                    )
+                elif data is not None:
+                    # Send as form data or raw data
+                    response = await client.post(
+                        url,
+                        headers=headers or {},
+                        data=data
+                    )
+                else:
+                    # POST with no body
+                    response = await client.post(
+                        url,
+                        headers=headers or {}
+                    )
+            else:
+                # Default to GET
+                response = await client.get(url, headers=headers or {})
+            
             response.raise_for_status()
             try:
                 return response.json()

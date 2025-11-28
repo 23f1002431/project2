@@ -43,10 +43,18 @@ Create a JSON plan with the following structure:
             "name": "unique_name_for_result",
             "url": "if applicable",
             "headers": {{"if": "api_call"}},
+            "method": "GET|POST (REQUIRED for api_call - use POST if description mentions POST, GET otherwise)",
+            "data": {{"if": "POST request with form data"}},
+            "json": {{"if": "POST request with JSON body - extract JSON from quiz text if mentioned"}},
             "input": "name_of_previous_step_result"
         }}
     ]
 }}
+
+IMPORTANT for api_call steps:
+- If the description mentions "POST" or "post", set "method": "POST"
+- If the quiz text contains a JSON payload to send, extract it and include it in the "json" field
+- Always include the "method" field for api_call steps
 
 Return only valid JSON."""
         
@@ -166,112 +174,98 @@ Return JSON with:
     def _call_llm(self, prompt: str, system_prompt: str = None) -> str:
         """Make API call to configured LLM provider."""
         logger.debug(f"[LLM Client] Calling LLM with provider: {self.provider}")
-        if self.provider == "aipipe":
-            return self._call_aipipe(prompt, system_prompt)
+        if self.provider == "gemini":
+            return self._call_gemini(prompt, system_prompt)
         
         raise ValueError(f"Unsupported LLM provider: {self.provider}")
     
-    def _call_aipipe(self, prompt: str, system_prompt: Optional[str]) -> str:
-        """Invoke AiPipe chat completions endpoint."""
-        if not config.AIPIPE_API_KEY:
-            raise RuntimeError("AIPIPE_API_KEY is not configured.")
+    def _call_gemini(self, prompt: str, system_prompt: Optional[str]) -> str:
+        """Invoke Google Gemini API."""
+        if not config.GEMINI_KEY:
+            raise RuntimeError("GEMINI_KEY is not configured.")
         
-        base_url = (config.AIPIPE_BASE_URL or "").rstrip("/")
-        endpoint = f"{base_url}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {config.AIPIPE_API_KEY}",
-            "Content-Type": "application/json",
-        }
+        endpoint = config.GEMINI_BASE_URL
+        headers = {"Content-Type": "application/json"}
+        params = {"key": config.GEMINI_KEY}
+        
+        system_text = system_prompt or self._default_system_prompt
+        combined_prompt = f"{system_text}\n\n{prompt}" if system_text else prompt
+        
         payload = {
-            "model": config.AIPIPE_MODEL,
-            "messages": [
+            "contents": [
                 {
-                    "role": "system",
-                    "content": system_prompt or self._default_system_prompt,
-                },
-                {"role": "user", "content": prompt},
+                    "role": "user",
+                    "parts": [{"text": combined_prompt}],
+                }
             ],
-            "temperature": config.LLM_TEMPERATURE,
-            "max_tokens": config.LLM_MAX_TOKENS,
+            "generationConfig": {
+                "temperature": config.LLM_TEMPERATURE,
+                "maxOutputTokens": config.LLM_MAX_TOKENS,
+            },
         }
         
-        logger.info(f"[LLM Client] Calling AiPipe API...")
+        logger.info(f"[LLM Client] Calling Gemini API...")
         logger.info(f"  Endpoint: {endpoint}")
-        logger.info(f"  Model: {config.AIPIPE_MODEL}")
-        logger.info(f"  Prompt length: {len(prompt)} characters")
-        logger.info(f"  Prompt preview: {prompt[:200]}..." if len(prompt) > 200 else f"  Prompt: {prompt}")
+        logger.info(f"  Prompt length: {len(combined_prompt)} characters")
         
         try:
             response = httpx.post(
                 endpoint,
-                json=payload,
                 headers=headers,
+                params=params,
+                json=payload,
                 timeout=config.LLM_REQUEST_TIMEOUT,
             )
             response.raise_for_status()
-            logger.info(f"[LLM Client] AiPipe API call successful (Status: {response.status_code})")
         except httpx.HTTPError as exc:
-            logger.error(f"[LLM Client] AiPipe API request failed: {exc}")
-            logger.error(f"[LLM Client] Check your network connection and AIPIPE_API_KEY configuration")
+            logger.error(f"[LLM Client] Gemini API request failed: {exc}")
             raise RuntimeError(f"LLM API request failed: {exc}") from exc
         
         try:
             data = response.json()
-            logger.info(f"[LLM Client] AiPipe API response received")
         except ValueError as exc:
-            logger.error(f"[LLM Client] AiPipe API returned non-JSON response")
+            logger.error("[LLM Client] Gemini API returned non-JSON response")
             logger.error(f"[LLM Client] Response text: {response.text[:500]}")
-            raise RuntimeError(f"LLM API returned invalid response: {exc}") from exc
+            raise RuntimeError("LLM API returned invalid JSON") from exc
         
-        choices = data.get("choices", [])
-        if not choices:
-            logger.error(f"[LLM Client] AiPipe API response missing choices")
-            logger.error(f"[LLM Client] Full response: {json.dumps(data, indent=2)}")
-            raise RuntimeError("LLM API response missing choices")
+        try:
+            candidates = data["candidates"]
+            parts = candidates[0]["content"]["parts"]
+            text = "".join(part.get("text", "") for part in parts).strip()
+        except (KeyError, IndexError) as exc:
+            logger.error(f"[LLM Client] Unexpected Gemini response: {json.dumps(data, indent=2)}")
+            raise RuntimeError("Unexpected Gemini response format") from exc
         
-        message = choices[0].get("message", {})
-        content = message.get("content")
-        if isinstance(content, list):
-            # Some APIs return list of segments
-            content = " ".join(
-                segment.get("text", "") if isinstance(segment, dict) else str(segment)
-                for segment in content
-            ).strip()
-        
-        elif isinstance(content, (dict,)):
-            content = content.get("text", "")
-        
-        logger.info(f"[LLM Client] LLM response content:")
-        logger.info(f"  Length: {len(str(content))} characters")
-        logger.info(f"  Content: {str(content)[:500]}..." if len(str(content)) > 500 else f"  Content: {content}")
-        
-        return (content or "").strip()
+        logger.info(f"[LLM Client] Gemini response length: {len(text)} characters")
+        return text
     
     def _parse_response(self, response: str) -> Any:
         """Parse LLM response to extract answer."""
-        response = response.strip()
+        response = (response or "").strip()
         
-        # Try to parse as JSON
+        if not response:
+            return response
+        
+        # Try JSON
         try:
             return json.loads(response)
-        except:
+        except json.JSONDecodeError:
             pass
         
-        # Try to parse as number
+        # Try numbers
         try:
-            if '.' in response:
+            if "." in response:
                 return float(response)
-            else:
-                return int(response)
-        except:
+            return int(response)
+        except ValueError:
             pass
         
-        # Try to parse as boolean
-        if response.lower() in ['true', 'yes']:
+        # Try booleans
+        lowered = response.lower()
+        if lowered in {"true", "yes"}:
             return True
-        if response.lower() in ['false', 'no']:
+        if lowered in {"false", "no"}:
             return False
         
-        # Return as string
         return response
 

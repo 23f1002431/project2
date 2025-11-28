@@ -205,10 +205,76 @@ class QuizSolver:
                     intermediate_results[step.get("name", "scraped")] = scraped_data
                     
             elif step_type == "api_call":
-                # Make API call
+                # Make API call (GET or POST)
                 api_url = step.get("url")
                 headers = step.get("headers", {})
-                data = await self.data_processor.call_api(api_url, headers)
+                
+                # Determine method: check step JSON first, then infer from description
+                method = step.get("method", "").upper()
+                if not method:
+                    # Infer method from description
+                    desc_lower = step_description.lower()
+                    if "post" in desc_lower and "get" not in desc_lower:
+                        method = "POST"
+                    elif "get" in desc_lower:
+                        method = "GET"
+                    else:
+                        method = "GET"  # Default
+                
+                post_data = step.get("data")  # For form data
+                post_json = step.get("json")  # For JSON data
+                
+                # If POST but no JSON/data provided, try to extract from quiz text
+                if method == "POST" and not post_json and not post_data:
+                    quiz_text = quiz_info.get("quiz_text", "")
+                    # Try to extract JSON from quiz text - look for JSON objects
+                    # Pattern to match JSON objects (handles nested objects)
+                    json_patterns = [
+                        r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}',  # Simple nested JSON
+                        r'\{.*?"email".*?\}',  # JSON with email field
+                        r'\{.*?"answer".*?\}',  # JSON with answer field
+                    ]
+                    for pattern in json_patterns:
+                        json_match = re.search(pattern, quiz_text, re.DOTALL)
+                        if json_match:
+                            try:
+                                extracted_json_str = json_match.group(0)
+                                # Clean up common issues
+                                extracted_json_str = extracted_json_str.strip()
+                                # Remove markdown code blocks if present
+                                if extracted_json_str.startswith('```'):
+                                    extracted_json_str = extracted_json_str.split('```')[1]
+                                    if extracted_json_str.startswith('json'):
+                                        extracted_json_str = extracted_json_str[4:]
+                                extracted_json_str = extracted_json_str.strip()
+                                
+                                extracted_json = json.loads(extracted_json_str)
+                                # Check if it has the structure we expect (email, secret, url, answer)
+                                if isinstance(extracted_json, dict) and ("email" in extracted_json or "answer" in extracted_json):
+                                    # Use actual values from quiz_info if available
+                                    if "email" in extracted_json and extracted_json["email"] == "your email":
+                                        # This is a template, don't use it
+                                        continue
+                                    post_json = extracted_json
+                                    logger.info(f"[Quiz Solver] Extracted JSON payload from quiz text: {post_json}")
+                                    break
+                            except json.JSONDecodeError:
+                                continue
+                            except Exception as e:
+                                logger.warning(f"[Quiz Solver] Failed to parse extracted JSON: {e}")
+                                continue
+                
+                logger.info(f"[Quiz Solver] Making {method} request to {api_url}")
+                if method == "POST":
+                    logger.info(f"[Quiz Solver] POST payload: {post_json or post_data or 'None'}")
+                
+                data = await self.data_processor.call_api(
+                    api_url, 
+                    headers=headers,
+                    method=method,
+                    data=post_data,
+                    json_data=post_json
+                )
                 intermediate_results[step.get("name", "api_data")] = data
                 
             elif step_type == "process_data":
