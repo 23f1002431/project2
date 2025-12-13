@@ -49,5 +49,5 @@ REQUEST_TIMEOUT = 30
 
 # API configuration
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
-API_PORT = int(os.getenv("API_PORT", "8000"))
+API_PORT = int(os.getenv("API_PORT", "7860"))
 

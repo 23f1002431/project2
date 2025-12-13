@@ -433,6 +433,34 @@ async def handle_quiz(quiz_request: QuizRequest):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
+@app.get("/")
+async def root(request: Request):
+    """Root endpoint with API information."""
+    base_url = f"{request.url.scheme}://{request.url.netloc}"
+    return {
+        "service": "Autonomous Quiz Solver API",
+        "version": "1.0.0",
+        "status": "running",
+        "endpoints": {
+            "health": f"{base_url}/health",
+            "quiz": f"{base_url}/quiz (POST)",
+            "test_submit": f"{base_url}/test-submit (POST)"
+        },
+        "documentation": {
+            "description": "An intelligent system that autonomously solves quiz chains using LLM-powered reasoning",
+            "features": [
+                "Autonomous quiz solving across multiple URLs",
+                "Advanced data processing (CSV, PDF, JSON, HTML)",
+                "Visualization generation",
+                "Sandboxed code execution",
+                "Google Gemini 2.5 Flash integration"
+            ]
+        },
+        "health_check": f"{base_url}/health",
+        "timestamp": datetime.now().isoformat()
+    }
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint with detailed statistics."""
