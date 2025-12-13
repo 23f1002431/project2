@@ -37,6 +37,54 @@ quiz_solver = QuizSolver(llm_client, data_processor)
 # Track active quiz sessions
 active_sessions: Dict[str, Dict[str, Any]] = {}
 
+# Health monitoring
+class HealthMonitor:
+    """Monitor system health and track background tasks."""
+    
+    def __init__(self):
+        self.start_time = datetime.now()
+        self.total_quizzes = 0
+        self.successful_quizzes = 0
+        self.failed_quizzes = 0
+        self.active_tasks = 0
+        self.task_history = []
+    
+    def record_quiz_start(self, quiz_url: str):
+        """Record that a quiz task has started."""
+        self.total_quizzes += 1
+        self.active_tasks += 1
+    
+    def record_quiz_complete(self, quiz_url: str, success: bool):
+        """Record that a quiz task has completed."""
+        self.active_tasks = max(0, self.active_tasks - 1)
+        if success:
+            self.successful_quizzes += 1
+        else:
+            self.failed_quizzes += 1
+        
+        self.task_history.append({
+            "url": quiz_url,
+            "success": success,
+            "timestamp": datetime.now().isoformat()
+        })
+        # Keep only last 100 entries
+        if len(self.task_history) > 100:
+            self.task_history = self.task_history[-100:]
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get current health statistics."""
+        uptime = (datetime.now() - self.start_time).total_seconds()
+        return {
+            "uptime_seconds": uptime,
+            "total_quizzes": self.total_quizzes,
+            "successful_quizzes": self.successful_quizzes,
+            "failed_quizzes": self.failed_quizzes,
+            "active_tasks": self.active_tasks,
+            "success_rate": (self.successful_quizzes / self.total_quizzes * 100) if self.total_quizzes > 0 else 0
+        }
+
+health_monitor = HealthMonitor()
+
 
 class QuizRequest(BaseModel):
     """Request model for quiz endpoint."""
@@ -71,6 +119,9 @@ async def solve_quiz_task(email: str, secret: str, quiz_url: str, start_time: da
         start_time = datetime.now()
     timeout = timedelta(seconds=config.QUIZ_TIMEOUT)
     
+    health_monitor.record_quiz_start(quiz_url)
+    success = False
+    
     try:
         logger.info(f"[Quiz Task] Starting quiz solving for: {quiz_url}")
         
@@ -98,6 +149,19 @@ async def solve_quiz_task(email: str, secret: str, quiz_url: str, start_time: da
         
         if not quiz_info.get("submit_url"):
             logger.error(f"[Quiz Task] No submit URL found for: {quiz_url}")
+            # Cleanup page/context before returning
+            page = quiz_info.get("page")
+            context = quiz_info.get("context")
+            if page:
+                try:
+                    await page.close()
+                except:
+                    pass
+            if context:
+                try:
+                    await context.close()
+                except:
+                    pass
             return {
                 "status": "error",
                 "message": "Could not find submit URL in quiz page"
@@ -106,10 +170,27 @@ async def solve_quiz_task(email: str, secret: str, quiz_url: str, start_time: da
         submit_url = quiz_info["submit_url"]
         logger.info(f"[Quiz Task] Submit URL found: {submit_url}")
         
-        # Solve quiz
+        # Solve quiz (this will clean up page/context after solving)
         logger.info(f"[Quiz Task] Solving quiz...")
-        answer = await quiz_solver.solve_quiz(quiz_info)
-        logger.info(f"[Quiz Task] Answer generated: {answer}")
+        try:
+            answer = await quiz_solver.solve_quiz(quiz_info)
+            logger.info(f"[Quiz Task] ✅ Answer generated: {answer} (type: {type(answer).__name__})")
+        except Exception as e:
+            logger.error(f"[Quiz Task] ERROR: Failed to solve quiz: {str(e)}", exc_info=True)
+            # Cleanup on error
+            page = quiz_info.get("page")
+            context = quiz_info.get("context")
+            if page:
+                try:
+                    await page.close()
+                except:
+                    pass
+            if context:
+                try:
+                    await context.close()
+                except:
+                    pass
+            raise
         
         # Submit answer
         max_attempts = 3
@@ -162,46 +243,65 @@ async def solve_quiz_task(email: str, secret: str, quiz_url: str, start_time: da
                     }
             
             if response.get("correct"):
-                logger.info(f"[Quiz Task] Answer is CORRECT!")
-                # Answer is correct
+                logger.info(f"[Quiz Task] ✅ Answer is CORRECT!")
+                # Answer is correct - check for next quiz
                 next_url = response.get("url")
-                if next_url:
-                    logger.info(f"[Quiz Task] Moving to next quiz: {next_url}")
-                    # Continue to next quiz
-                    return await solve_quiz_task(email, secret, next_url, start_time)
+                if next_url and next_url.strip():
+                    logger.info(f"[Quiz Task] 🔄 Next quiz URL received: {next_url}")
+                    logger.info(f"[Quiz Task] Continuing to solve next quiz...")
+                    # Continue to next quiz - recursively solve
+                    result = await solve_quiz_task(email, secret, next_url, start_time)
+                    # Merge results if needed
+                    return result
                 else:
-                    logger.info(f"[Quiz Task] Quiz completed successfully!")
-                    # Quiz complete
+                    logger.info(f"[Quiz Task] ✅ All quizzes completed successfully!")
+                    success = True
+                    health_monitor.record_quiz_complete(quiz_url, True)
+                    # Quiz complete - no more URLs
                     return {
                         "status": "success",
                         "correct": True,
                         "url": None,
-                        "reason": response.get("reason", "Quiz completed")
+                        "reason": response.get("reason", "All quizzes completed successfully")
                     }
             else:
-                logger.warning(f"[Quiz Task] Answer is INCORRECT. Reason: {response.get('reason')}")
+                logger.warning(f"[Quiz Task] ❌ Answer is INCORRECT. Reason: {response.get('reason')}")
                 # Answer is wrong
-                if response.get("url"):
-                    logger.info(f"[Quiz Task] New URL provided, moving to: {response.get('url')}")
-                    # New URL provided, solve that instead
-                    next_url = response["url"]
+                next_url = response.get("url")
+                
+                # If a new URL is provided, we can either:
+                # 1. Continue to that URL (skip retry for current quiz)
+                # 2. Or retry current quiz and ignore the new URL
+                # Based on requirements: "you may receive the next url to proceed to. If so, you can choose to skip to that URL instead of re-submitting to the current one."
+                if next_url and next_url.strip():
+                    logger.info(f"[Quiz Task] 🔄 New URL provided despite incorrect answer, moving to: {next_url}")
+                    logger.info(f"[Quiz Task] Skipping retry and continuing to next quiz...")
+                    # Continue to next quiz instead of retrying
                     return await solve_quiz_task(email, secret, next_url, start_time)
                 else:
-                    # Try to improve answer
+                    # No new URL - try to improve and resubmit
                     if attempt < max_attempts - 1:
-                        logger.info(f"[Quiz Task] Improving answer based on feedback...")
+                        logger.info(f"[Quiz Task] 🔄 Improving answer based on feedback (attempt {attempt + 1}/{max_attempts})...")
+                        logger.info(f"[Quiz Task] Feedback: {response.get('reason', 'No feedback provided')}")
                         # Use feedback to improve
                         reason = response.get("reason", "")
-                        answer = await improve_answer(quiz_info, answer, reason)
+                        improved_answer = await improve_answer(quiz_info, answer, reason)
+                        logger.info(f"[Quiz Task] Improved answer: {improved_answer} (was: {answer})")
+                        answer = improved_answer
+                        # Continue loop to retry submission with improved answer
+                        continue
                     else:
-                        logger.error(f"[Quiz Task] Failed after {max_attempts} attempts")
+                        logger.error(f"[Quiz Task] ❌ Failed after {max_attempts} attempts for: {quiz_url}")
+                        health_monitor.record_quiz_complete(quiz_url, False)
                         return {
                             "status": "incorrect",
                             "correct": False,
-                            "reason": response.get("reason")
+                            "reason": response.get("reason", "Failed after multiple attempts"),
+                            "url": quiz_url
                         }
         
         logger.error(f"[Quiz Task] Exhausted all attempts for: {quiz_url}")
+        health_monitor.record_quiz_complete(quiz_url, False)
         return {
             "status": "error",
             "message": "Failed to solve quiz after multiple attempts"
@@ -209,10 +309,15 @@ async def solve_quiz_task(email: str, secret: str, quiz_url: str, start_time: da
         
     except Exception as e:
         logger.error(f"[Quiz Task] Exception while solving quiz: {str(e)}", exc_info=True)
+        health_monitor.record_quiz_complete(quiz_url, False)
         return {
             "status": "error",
             "message": f"Error solving quiz: {str(e)}"
         }
+    finally:
+        # Ensure we record completion even if task fails unexpectedly
+        if not success:
+            health_monitor.record_quiz_complete(quiz_url, False)
 
 
 async def improve_answer(
@@ -221,15 +326,36 @@ async def improve_answer(
     feedback: str
 ) -> Any:
     """Use LLM to improve answer based on feedback."""
-    prompt = f"""The previous answer was incorrect. Feedback: {feedback}
+    quiz_text = quiz_info.get('quiz_text', '')
     
-Quiz task: {quiz_info.get('quiz_text', '')}
-Previous answer: {current_answer}
+    logger.info(f"[Improve Answer] Analyzing feedback to improve answer...")
+    logger.info(f"[Improve Answer] Current answer: {current_answer}")
+    logger.info(f"[Improve Answer] Feedback: {feedback}")
+    
+    prompt = f"""The previous answer was incorrect. Analyze the feedback and quiz task carefully to provide a correct answer.
 
-Provide an improved answer."""
+Quiz Task:
+{quiz_text}
+
+Previous Answer: {current_answer}
+Feedback: {feedback}
+
+INSTRUCTIONS:
+1. Carefully review the quiz task to understand what is actually being asked
+2. Analyze why the previous answer was incorrect based on the feedback
+3. Re-examine the problem and identify the correct approach
+4. Provide a new, improved answer that addresses the feedback
+5. Ensure your answer is accurate and matches the expected format
+
+CRITICAL: Return ONLY the improved answer itself, nothing else. No explanations, no prefix, just the answer.
+
+Improved Answer:"""
     
-    improved = await llm_client.solve_step(prompt, {})
-    return improved
+    improved = await llm_client._call_llm(prompt)
+    parsed = llm_client._parse_response(improved)
+    
+    logger.info(f"[Improve Answer] Improved answer: {parsed} (type: {type(parsed).__name__})")
+    return parsed
 
 
 @app.post("/quiz", response_model=QuizResponse)
@@ -257,22 +383,46 @@ async def handle_quiz(quiz_request: QuizRequest):
         if quiz_request.email != config.STUDENT_EMAIL:
             logger.warning(f"Email mismatch: {quiz_request.email} vs {config.STUDENT_EMAIL}")
         
+        # Store task info
+        task_id = f"{quiz_request.url}_{datetime.now().timestamp()}"
+        active_sessions[task_id] = {
+            "url": quiz_request.url,
+            "started_at": datetime.now().isoformat(),
+            "status": "processing"
+        }
+        
         # Use asyncio.create_task to run in background (fire and forget)
-        task = asyncio.create_task(
-            solve_quiz_task(
-                quiz_request.email,
-                quiz_request.secret,
-                quiz_request.url
-            )
-        )
-        logger.info(f"Background task created for quiz: {quiz_request.url}")
+        async def task_with_cleanup():
+            try:
+                result = await solve_quiz_task(
+                    quiz_request.email,
+                    quiz_request.secret,
+                    quiz_request.url
+                )
+                active_sessions[task_id]["status"] = result.get("status", "completed")
+                active_sessions[task_id]["completed_at"] = datetime.now().isoformat()
+                active_sessions[task_id]["result"] = result
+            except Exception as e:
+                logger.error(f"Error in background task: {e}", exc_info=True)
+                active_sessions[task_id]["status"] = "error"
+                active_sessions[task_id]["error"] = str(e)
+                active_sessions[task_id]["completed_at"] = datetime.now().isoformat()
+            finally:
+                # Cleanup old sessions (keep last 50)
+                if len(active_sessions) > 50:
+                    oldest_key = min(active_sessions.keys(), key=lambda k: active_sessions[k].get("started_at", ""))
+                    del active_sessions[oldest_key]
+        
+        task = asyncio.create_task(task_with_cleanup())
+        logger.info(f"Background task created for quiz: {quiz_request.url} (task_id: {task_id})")
         
         # Return immediate response
         return JSONResponse(
             status_code=200,
             content={
                 "status": "accepted",
-                "message": "Quiz task received and processing started"
+                "message": "Quiz task received and processing started",
+                "task_id": task_id
             }
         )
         
@@ -285,9 +435,19 @@ async def handle_quiz(quiz_request: QuizRequest):
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint with detailed statistics."""
     logger.debug("Health check requested")
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    stats = health_monitor.get_stats()
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "uptime_seconds": stats["uptime_seconds"],
+        "total_quizzes": stats["total_quizzes"],
+        "successful_quizzes": stats["successful_quizzes"],
+        "failed_quizzes": stats["failed_quizzes"],
+        "active_tasks": stats["active_tasks"],
+        "success_rate": round(stats["success_rate"], 2)
+    }
 
 
 @app.post("/test-submit")

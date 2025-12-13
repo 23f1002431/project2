@@ -1,17 +1,47 @@
-# Quiz Solver Application
+# Autonomous Quiz Solving System
 
-An intelligent application that solves data-related quizzes using LLMs, capable of handling data sourcing, preparation, analysis, and visualization tasks.
+An intelligent, production-ready system that autonomously solves complex quiz chains across multiple URLs using LLM-powered reasoning, advanced data processing, and dynamic code execution.
 
 ## Features
 
-- **API Endpoint**: Accepts POST requests with quiz tasks
-- **Secret Verification**: Validates requests using a secret string
-- **Headless Browser**: Renders JavaScript-heavy quiz pages using Playwright
-- **LLM Integration**: Uses the gemini API (or another provider you configure) for task understanding and solving
-- **Data Processing**: Handles PDFs, images, text, CSV, and structured data
-- **Analysis Capabilities**: Performs filtering, sorting, aggregation, and statistical analysis
-- **Visualization**: Generates charts and graphs as base64-encoded images
-- **Automatic Submission**: Submits answers and handles follow-up quiz URLs
+### ✅ Autonomous Quiz Solving
+- **Quiz Chain Navigation**: Automatically follows quiz chains across multiple URLs
+- **Answer Submission**: Submits answers and processes evaluator responses
+- **Retry Logic**: Detects wrong answers, retries with improved solutions, and moves ahead
+- **Multi-Step Chains**: Handles complex multi-step question chains seamlessly
+
+### 🌐 Enhanced Scraping & Rendering
+- **Playwright Chromium**: Uses Playwright Chromium for JavaScript-heavy pages
+- **Advanced Extraction**: Extracts tables, text, scripts, and embedded base64 content
+- **Media Handling**: Processes audio files, video elements, and media content
+- **Dynamic Content**: Handles dynamic web content with full JavaScript rendering
+- **Base64 Decoding**: Automatically decodes base64-encoded quiz instructions
+
+### 📊 Comprehensive Data Processing
+- **Multi-Format Support**: Processes CSV, PDF, JSON, HTML tables, and more
+- **Numerical Operations**: Performs complex numerical and statistical operations
+- **Data Cleansing**: Handles data cleaning, transformation, and normalization
+- **Advanced Aggregation**: Supports filtering, sorting, grouping, and aggregation
+- **Table Extraction**: Extracts and processes tables from HTML and PDFs
+
+### 🎨 Visualization & Execution
+- **Plot Generation**: Generates plots/images in base64 format (bar, line, scatter, histogram, pie, box, heatmap)
+- **File Management**: Downloads and manages temporary files
+- **Dynamic Code Execution**: Runs dynamically generated Python code safely
+- **Sandboxed Environment**: Secure, restricted execution environment for code
+
+### 🧠 LLM-Powered Intelligence
+- **Google Gemini 2.5 Flash**: Uses Gemini 2.5 Flash for intelligent reasoning
+- **Tool Selection**: Intelligently decides which tool to execute next
+- **Action Planning**: Plans multi-step actions intelligently
+- **Adaptive Learning**: Learns from evaluator responses to improve answers
+
+### 🏭 Production Ready
+- **Dockerized**: Fully containerized for fast deployment
+- **Multi-Platform**: Works on Render, Railway, Hugging Face Spaces
+- **Health Monitoring**: Comprehensive health monitoring with statistics
+- **Background Tasks**: Efficient background task management
+- **Performance Optimized**: Optimized for production performance
 
 ## Setup
 
@@ -49,8 +79,14 @@ STUDENT_EMAIL=your-email@example.com
 STUDENT_SECRET=your-secret-string
 GEMINI_KEY=your-gemini-api-key
 DEFAULT_LLM_PROVIDER=gemini
+GEMINI_MODEL=gemini-2.5-flash
 API_HOST=0.0.0.0
 API_PORT=8000
+LLM_MAX_TOKENS=2000
+LLM_TEMPERATURE=0.3
+LLM_REQUEST_TIMEOUT=60
+QUIZ_TIMEOUT=180
+REQUEST_TIMEOUT=30
 ```
 
 ## Usage
@@ -93,13 +129,19 @@ Accepts quiz tasks and solves them automatically.
 
 #### GET `/health`
 
-Health check endpoint.
+Health check endpoint with detailed statistics.
 
 **Response:**
 ```json
 {
   "status": "healthy",
-  "timestamp": "2025-11-29T15:00:00"
+  "timestamp": "2025-11-29T15:00:00",
+  "uptime_seconds": 3600,
+  "total_quizzes": 10,
+  "successful_quizzes": 8,
+  "failed_quizzes": 2,
+  "active_tasks": 1,
+  "success_rate": 80.0
 }
 ```
 
@@ -120,23 +162,36 @@ curl -X POST http://localhost:8000/quiz \
 
 ### Components
 
-1. **main.py**: FastAPI server handling HTTP requests
-2. **quiz_solver.py**: Core quiz solving logic with browser automation
-3. **llm_client.py**: LLM API integration (OpenAI/Anthropic)
-4. **data_processor.py**: Data processing, analysis, and visualization
-5. **config.py**: Configuration management
-6. **prompts.py**: System and user prompts for prompt testing
+1. **main.py**: FastAPI server with health monitoring and background task management
+2. **quiz_solver.py**: Core quiz solving logic with enhanced browser automation
+3. **llm_client.py**: LLM API integration (Google Gemini 2.5 Flash) with code generation
+4. **data_processor.py**: Advanced data processing, analysis, and visualization
+5. **code_executor.py**: Sandboxed Python code execution environment
+6. **config.py**: Configuration management with environment variable support
+7. **prompts.py**: System and user prompts for prompt testing
 
 ### Workflow
 
-1. API receives POST request with quiz URL
-2. Secret is verified
-3. Quiz page is fetched using headless browser
-4. Quiz instructions are parsed (including base64-encoded content)
-5. LLM analyzes task and creates execution plan
-6. Plan is executed (data sourcing, processing, analysis, visualization)
-7. Answer is extracted and submitted
-8. If correct, next quiz URL is processed; if incorrect, answer is improved
+1. **API receives POST request** with quiz URL
+2. **Secret verification** validates the request
+3. **Quiz page fetched** using Playwright Chromium with full JS rendering
+4. **Content extraction** parses quiz instructions, base64, tables, audio, media
+5. **LLM analysis** uses Gemini 2.5 Flash to understand task and create execution plan
+6. **Plan execution**:
+   - Downloads files (CSV, PDF, JSON, etc.)
+   - Scrapes web data
+   - Makes API calls
+   - Processes data (cleaning, transformation)
+   - Analyzes data (filtering, aggregation, statistics)
+   - Generates visualizations (plots as base64)
+   - Executes dynamic Python code (sandboxed)
+   - Uses LLM reasoning for complex steps
+7. **Answer extraction** from intermediate results
+8. **Answer submission** to quiz endpoint
+9. **Response handling**:
+   - If correct: Process next quiz URL (chain continuation)
+   - If incorrect: Improve answer using feedback and retry
+   - Track success/failure in health monitor
 
 ## Prompt Testing
 

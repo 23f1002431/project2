@@ -16,7 +16,7 @@ STUDENT_SECRET = os.getenv("STUDENT_SECRET", "your-secret-string")
 # LLM provider configuration
 DEFAULT_LLM_PROVIDER = os.getenv("DEFAULT_LLM_PROVIDER", "gemini").lower()
 GEMINI_KEY = os.getenv("GEMINI_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 # Always construct URL from model name to avoid template variable issues
 # If GEMINI_BASE_URL is explicitly set, use it, but ensure it doesn't contain template vars
 gemini_base_url_env = os.getenv("GEMINI_BASE_URL", "")
@@ -46,4 +46,8 @@ except ImportError:
 
 QUIZ_TIMEOUT = 180  
 REQUEST_TIMEOUT = 30
+
+# API configuration
+API_HOST = os.getenv("API_HOST", "0.0.0.0")
+API_PORT = int(os.getenv("API_PORT", "8000"))
 

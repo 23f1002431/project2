@@ -8,6 +8,7 @@ import base64
 import asyncio
 import logging
 from typing import Dict, Any, Optional
+from urllib.parse import urlparse
 from playwright.async_api import async_playwright, Page, Browser
 import httpx
 from bs4 import BeautifulSoup
@@ -22,6 +23,7 @@ import plotly.express as px
 
 from llm_client import LLMClient
 from data_processor import DataProcessor
+from code_executor import CodeExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,7 @@ class QuizSolver:
     def __init__(self, llm_client: LLMClient, data_processor: DataProcessor):
         self.llm_client = llm_client
         self.data_processor = data_processor
+        self.code_executor = CodeExecutor()
         self.browser: Optional[Browser] = None
         self.playwright = None
         
@@ -72,33 +75,118 @@ class QuizSolver:
             # Extract quiz instructions
             soup = BeautifulSoup(content, 'html.parser')
             
-            # Look for base64 encoded content in script tags
+            # Enhanced extraction: base64, tables, audio, media
             scripts = soup.find_all('script')
             quiz_text = ""
-            submit_url = None
+            extracted_media = {}
             
+            # Extract base64 encoded content from scripts
             for script in scripts:
                 script_text = script.string or ""
-                # Check for base64 encoded content
-                if 'atob(' in script_text or 'btoa(' in script_text:
-                    # Extract base64 string
-                    base64_match = re.search(r'atob\(`([^`]+)`\)', script_text)
-                    if base64_match:
+                # Check for base64 encoded content (multiple patterns)
+                base64_patterns = [
+                    r'atob\(["\']([^"\']+)["\']\)',
+                    r'atob\(`([^`]+)`\)',
+                    r'btoa\(["\']([^"\']+)["\']\)',
+                    r'["\']([A-Za-z0-9+/=]{50,})["\']',  # Standalone base64 strings
+                ]
+                
+                for pattern in base64_patterns:
+                    matches = re.finditer(pattern, script_text)
+                    for match in matches:
                         try:
-                            decoded = base64.b64decode(base64_match.group(1)).decode('utf-8')
+                            base64_str = match.group(1)
+                            # Try to decode as text
+                            decoded = base64.b64decode(base64_str).decode('utf-8', errors='ignore')
                             quiz_text += decoded + "\n"
                         except:
-                            pass
-                
-                # Look for submit URL
-                url_match = re.search(r'https?://[^\s<>"\'\)]+/submit', script_text)
-                if url_match:
-                    submit_url = url_match.group(0)
+                            # Might be binary data (audio, image, etc.)
+                            try:
+                                decoded_bytes = base64.b64decode(base64_str)
+                                # Detect media type
+                                if decoded_bytes.startswith(b'\xff\xfb') or decoded_bytes.startswith(b'ID3'):
+                                    extracted_media[f'audio_{len(extracted_media)}'] = {
+                                        'type': 'audio',
+                                        'data': base64_str,
+                                        'bytes': decoded_bytes[:100]  # Sample only
+                                    }
+                            except:
+                                pass
             
-            # Also check visible text on page
+            # Extract embedded base64 from data URIs (images, audio, etc.)
+            data_uri_pattern = r'data:([^;]+);base64,([A-Za-z0-9+/=]+)'
+            data_uris = re.finditer(data_uri_pattern, content)
+            for match in data_uris:
+                media_type = match.group(1)
+                base64_data = match.group(2)
+                if 'audio' in media_type:
+                    extracted_media[f'audio_data_{len(extracted_media)}'] = {
+                        'type': 'audio',
+                        'mime': media_type,
+                        'data': base64_data
+                    }
+                elif 'image' in media_type:
+                    extracted_media[f'image_data_{len(extracted_media)}'] = {
+                        'type': 'image',
+                        'mime': media_type,
+                        'data': base64_data
+                    }
+            
+            # Extract audio elements
+            audio_elements = await page.query_selector_all('audio')
+            for i, audio in enumerate(audio_elements):
+                src = await audio.get_attribute('src')
+                if src:
+                    extracted_media[f'audio_src_{i}'] = {
+                        'type': 'audio_source',
+                        'url': src
+                    }
+            
+            # Extract video elements
+            video_elements = await page.query_selector_all('video')
+            for i, video in enumerate(video_elements):
+                src = await video.get_attribute('src')
+                if src:
+                    extracted_media[f'video_src_{i}'] = {
+                        'type': 'video_source',
+                        'url': src
+                    }
+            
+            # Extract embedded tables using JavaScript
+            tables_data = await page.evaluate("""
+                () => {
+                    const tables = Array.from(document.querySelectorAll('table'));
+                    return tables.map((table, idx) => {
+                        const rows = Array.from(table.querySelectorAll('tr'));
+                        const data = rows.map(row => {
+                            const cells = Array.from(row.querySelectorAll('td, th'));
+                            return cells.map(cell => cell.innerText.trim());
+                        });
+                        return {
+                            index: idx,
+                            data: data,
+                            html: table.outerHTML
+                        };
+                    });
+                }
+            """)
+            
+            # Extract visible text
             visible_text = await page.evaluate("() => document.body.innerText")
             if visible_text:
                 quiz_text += visible_text
+            
+            # Add table data to quiz text if found
+            if tables_data:
+                quiz_text += "\n\n=== EXTRACTED TABLES ===\n"
+                for table_info in tables_data:
+                    quiz_text += f"\nTable {table_info['index']}:\n"
+                    for row in table_info['data']:
+                        quiz_text += " | ".join(str(cell) for cell in row) + "\n"
+            
+            # Store extracted media in quiz_info
+            if extracted_media:
+                logger.info(f"[Quiz Solver] Extracted {len(extracted_media)} media items")
             
             logger.info(f"[Quiz Solver] Quiz text extracted:")
             logger.info(f"  Length: {len(quiz_text)} characters")
@@ -107,11 +195,26 @@ class QuizSolver:
             if len(quiz_text) > 500:
                 logger.info(f"  (Full text: {len(quiz_text)} characters)")
             
-            # Extract submit URL from visible text if not found in scripts
+            # Extract submit URL using improved logic
+            submit_url = None
+            
+            # Try to find full URL first
+            possible_urls = re.findall(r'https?://[^\s"]+', quiz_text)
+            for u in possible_urls:
+                if "submit" in u:
+                    submit_url = u
+                    logger.info(f"[Quiz Solver] Found submit URL in quiz text: {submit_url}")
+                    break
+            
+            # If not found, check for relative submit path
+            if not submit_url and "/submit" in quiz_text:
+                parsed = urlparse(url)
+                base_url = f"{parsed.scheme}://{parsed.netloc}"
+                submit_url = base_url + "/submit"
+                logger.info(f"[Quiz Solver] Using inferred submit URL: {submit_url}")
+            
             if not submit_url:
-                url_match = re.search(r'https?://[^\s<>"\'\)]+/submit', visible_text or "")
-                if url_match:
-                    submit_url = url_match.group(0)
+                raise RuntimeError(f"No submit URL found in quiz text for {url}")
             
             # Take screenshot for visual analysis if needed
             screenshot = await page.screenshot(full_page=True)
@@ -125,7 +228,9 @@ class QuizSolver:
                 "submit_url": submit_url,
                 "screenshot": screenshot,
                 "page": page,
-                "context": context  # Store context for cleanup
+                "context": context,  # Store context for cleanup
+                "extracted_media": extracted_media,
+                "tables": tables_data if tables_data else []
             }
             
             return result
@@ -300,16 +405,54 @@ class QuizSolver:
                 context = {k: str(v)[:1000] for k, v in intermediate_results.items()}
                 result = await self.llm_client.solve_step(step_description, context)
                 intermediate_results[step.get("name", "llm_result")] = result
+            
+            elif step_type == "execute_code":
+                # Execute Python code dynamically
+                code = step.get("code", "")
+                if not code:
+                    # If no code provided, try to generate it from description using LLM
+                    logger.info(f"[Quiz Solver] Generating code from description: {step_description}")
+                    code = await self.llm_client.generate_code(step_description, intermediate_results)
+                
+                if code:
+                    execution_result = await self.code_executor.execute_code(code)
+                    if execution_result.get("error"):
+                        logger.error(f"[Quiz Solver] Code execution error: {execution_result['error']}")
+                        raise ValueError(f"Code execution failed: {execution_result['error']}")
+                    
+                    # Use result or plot as the output
+                    if execution_result.get("plot"):
+                        intermediate_results[step.get("name", "code_plot")] = execution_result["plot"]
+                    elif execution_result.get("result") is not None:
+                        intermediate_results[step.get("name", "code_result")] = execution_result["result"]
+                    else:
+                        intermediate_results[step.get("name", "code_output")] = execution_result.get("output", "")
+                else:
+                    logger.warning(f"[Quiz Solver] No code provided for execute_code step")
         
-        # Final answer extraction
+        # Final answer extraction with full context
         try:
+            logger.info(f"[Quiz Solver] Extracting final answer from {len(intermediate_results)} intermediate results...")
+            logger.info(f"[Quiz Solver] Intermediate result keys: {list(intermediate_results.keys())}")
+            
+            # Log summary of intermediate results for debugging
+            for key, value in intermediate_results.items():
+                if isinstance(value, (str, int, float, bool)):
+                    logger.info(f"[Quiz Solver]   {key}: {value} (type: {type(value).__name__})")
+                else:
+                    logger.info(f"[Quiz Solver]   {key}: {type(value).__name__}")
+            
             final_answer = await self.llm_client.extract_answer(
                 quiz_info["quiz_text"],
                 intermediate_results
             )
+            logger.info(f"[Quiz Solver] ✅ Answer extracted successfully: {final_answer} (type: {type(final_answer).__name__})")
         except Exception as e:
             logger.error(f"[Quiz Solver] ERROR: Failed to extract answer: {str(e)}")
-            logger.error(f"[Quiz Solver] Intermediate results: {list(intermediate_results.keys())}")
+            logger.error(f"[Quiz Solver] Intermediate results keys: {list(intermediate_results.keys())}")
+            # Log more details about intermediate results
+            for key, value in intermediate_results.items():
+                logger.error(f"[Quiz Solver]   {key}: {type(value).__name__} = {str(value)[:200]}")
             raise ValueError(f"Failed to generate answer: {str(e)}") from e
         
         # Validate answer is not empty
